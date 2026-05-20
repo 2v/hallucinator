@@ -16,7 +16,7 @@ hallucinator-ingest = { path = "../../hallucinator-rs/crates/hallucinator-ingest
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "fs"] }
 tokio-util = "0.7"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 
 axum = { version = "0.8", features = ["multipart"] }
