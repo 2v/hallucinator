@@ -68,37 +68,24 @@ static ORG_AUTHOR_NAMES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     .collect()
 });
 
-/// Validate that at least one author in `ref_authors` matches one in `found_authors`.
-///
-/// Uses three modes:
-/// - **Organization mode**: If ref_author is a known org name (e.g., "OpenAI"),
-///   check if the org name appears in any found_author string.
-/// - **Last-name-only mode**: If most PDF-extracted authors lack first names/initials,
-///   compare only surnames (with partial suffix matching for multi-word surnames).
-/// - **Full mode**: Normalize to "FirstInitial surname" and check for set intersection.
+/// Validate that the cited authors plausibly belong to the paper whose
+/// authors are `found_authors`. Returns `false` for an author mismatch
+/// (including look-alike phantoms like "Isaac Shi" vs "Ivy Shi").
 pub fn validate_authors(ref_authors: &[String], found_authors: &[String]) -> bool {
     if ref_authors.is_empty() || found_authors.is_empty() {
         return false;
     }
 
-    // Check for organizational authors: when either the reference or the database
-    // lists an org name (e.g., "OpenAI", "Qwen Team", "DeepSeek-AI") instead of
-    // individual authors, skip author validation — we can't meaningfully compare
-    // org names against individual contributor names.
+    // Org names (e.g. "OpenAI", "Qwen Team") match by org match, not per-author.
     for author_list in [ref_authors, found_authors] {
         for author in author_list {
             let lower = author.trim().to_lowercase();
-            // Strip hyphens for matching (e.g., "DeepSeek-AI" → "deepseekai")
             let dehyphen = lower.replace('-', "");
-
-            // Direct match against known org names
             if ORG_AUTHOR_NAMES.contains(lower.as_str())
                 || ORG_AUTHOR_NAMES.contains(dehyphen.as_str())
             {
                 return true;
             }
-
-            // "X Team" pattern: "Qwen Team", "DeepSeek-AI Team"
             let words: Vec<&str> = lower.split_whitespace().collect();
             if words.last() == Some(&"team") && words.len() <= 3 {
                 return true;
@@ -112,7 +99,6 @@ pub fn validate_authors(ref_authors: &[String], found_authors: &[String]) -> boo
         .filter(|a| !a.is_empty())
         .collect();
 
-    // Determine if ref authors are last-name-only
     let last_name_only_count = ref_clean
         .iter()
         .filter(|a| !has_first_name_or_initial(a))
@@ -141,7 +127,6 @@ pub fn validate_authors(ref_authors: &[String], found_authors: &[String]) -> boo
                 if rn == fn_ {
                     return true;
                 }
-                // Check if one surname ends with the other
                 if fn_.ends_with(rn.as_str()) || rn.ends_with(fn_.as_str()) {
                     return true;
                 }
@@ -149,44 +134,12 @@ pub fn validate_authors(ref_authors: &[String], found_authors: &[String]) -> boo
         }
         false
     } else {
-        // Phantom-author guard — when the citation lists noticeably
-        // more authors than the DB record, count the surnames in the
-        // citation that don't appear in the DB record. A few unmatched
-        // names are tolerable (typos, unusual transliterations), but a
-        // citation that pads several unrelated names onto a real
-        // paper's author list — common for AI-hallucinated
-        // bibliographies that splice famous co-authors onto an existing
-        // title — should be flagged as a mismatch even though the
-        // genuine authors still overlap. Skipped when ref ≤ found (the
-        // et-al-truncation case is handled below).
-        //
-        // We don't gate on `found.len() >= 3` like a more conservative
-        // guard would: some DB records are themselves incomplete
-        // (DBLP's StackGuard entry has just 1 author of the real 10,
-        // and citations with 9 phantoms vs that single hit are common
-        // padded-citation patterns). Trusting DB completeness here
-        // would hand a "verified" stamp to citations whose author list
-        // bears no resemblance to the indexed paper. Better to flag
-        // and let the user mark safe than to silently approve.
+        // Phantom-author guard: a citation that pads several unrelated
+        // names onto a real paper's author list (common LLM behaviour)
+        // should be flagged even though the genuine authors still overlap.
+        // Uses cache::author_fingerprint to handle particle-prefixed
+        // surnames and to ignore "et al." tokens.
         if ref_authors.len() > found_authors.len() {
-            // Use the same `<initial>:<surname>` fingerprint as the
-            // mark-safe identity key (`compute_fp_identity` in cache.rs)
-            // — it's strictly stronger than `get_last_name` for the
-            // phantom check. Two cases this fixes vs. the surname-only
-            // form:
-            //
-            //  * Particle-prefixed surnames where one side carries the
-            //    particle and the other doesn't ("Emiliano De Cristofaro"
-            //    vs DBLP's "Cristofaro, E."). `get_last_name` produced
-            //    "de cristofaro" vs "cristofaro" → phantom inflated.
-            //  * Initial collisions where two authors share a surname
-            //    but have different initials ("J. Smith" vs "A. Smith");
-            //    surname-only would have called these the same person.
-            //
-            // The `et al.` token is stripped by author_fingerprint
-            // returning None on an unparseable string, so we don't need
-            // the explicit `last != "al"` guard the surname-only form
-            // had.
             let found_fps: HashSet<String> = found_authors
                 .iter()
                 .filter_map(|a| crate::cache::author_fingerprint(a))
@@ -197,29 +150,54 @@ pub fn validate_authors(ref_authors: &[String], found_authors: &[String]) -> boo
                     crate::cache::author_fingerprint(a).is_some_and(|fp| !found_fps.contains(&fp))
                 })
                 .count();
-            // Trip the guard when there are 3+ phantom surnames AND
-            // they make up >25% of the citation. The absolute floor
-            // keeps the check quiet for short citations with one or
-            // two unmatched names; the percentage floor keeps it from
-            // firing on long-but-mostly-correct rosters.
             if phantom_count >= 3 && phantom_count * 4 > ref_authors.len() {
                 return false;
             }
         }
 
-        let ref_set: HashSet<String> = ref_authors.iter().map(|a| normalize_author(a)).collect();
-        let found_set: HashSet<String> =
-            found_authors.iter().map(|a| normalize_author(a)).collect();
+        // Per-author classification: `compat` = surname collision + compat
+        // match, `lookalike` = surname collision but full first name
+        // differs ("Isaac Shi" vs "Ivy Shi"), `unknown` = surname not in
+        // found list. If any compat match exists alongside any lookalike,
+        // it's a confirmed paper with a swapped author — flag it.
+        let ref_keys: Vec<AuthorKey> =
+            ref_authors.iter().filter_map(|a| make_author_key(a)).collect();
+        let found_keys: Vec<AuthorKey> = found_authors
+            .iter()
+            .filter_map(|a| make_author_key(a))
+            .collect();
 
-        if !ref_set.is_disjoint(&found_set) {
+        let mut compat_count = 0usize;
+        let mut lookalike_count = 0usize;
+        for r in &ref_keys {
+            if r.surname.is_empty() {
+                continue;
+            }
+            let mut had_collision = false;
+            let mut had_compat = false;
+            for f in &found_keys {
+                if f.surname == r.surname {
+                    had_collision = true;
+                    if keys_compat(r, f) {
+                        had_compat = true;
+                        break;
+                    }
+                }
+            }
+            if had_compat {
+                compat_count += 1;
+            } else if had_collision {
+                lookalike_count += 1;
+            }
+        }
+
+        if compat_count > 0 && lookalike_count > 0 {
+            return false;
+        }
+        if compat_count > 0 {
             return true;
         }
 
-        // Surname-based fallback: compare just last names when initial-based
-        // comparison fails. This handles format mismatches like:
-        // - "C. Gregory" (Initial + Surname) vs "Gregory Cohen" (FirstName + Surname)
-        //   where the surname "Gregory" appears as a first name in the other format
-        // - Accent differences already handled by strip_diacritics in get_last_name
         let ref_surnames: HashSet<String> = ref_authors
             .iter()
             .filter_map(|a| {
@@ -235,17 +213,7 @@ pub fn validate_authors(ref_authors: &[String], found_authors: &[String]) -> boo
             })
             .collect();
 
-        if !ref_surnames.is_disjoint(&found_surnames) {
-            return true;
-        }
-
-        // Handle truncated author lists ("et al."):
-        // If the reference has significantly fewer authors than the DB result,
-        // check if ALL extracted authors appear in the found authors (subset match).
-        // This handles cases where the PDF says "Gentry et al." (1 author) but
-        // the DB returns all 5 authors including Gentry.
-        // Threshold is 5 because ACM format typically shows up to 5 authors
-        // before "et al.", and USENIX/IEEE show up to 3.
+        // et-al truncation: "Gentry et al." ⊂ DB's full author list.
         if ref_authors.len() < found_authors.len()
             && ref_authors.len() <= 5
             && !ref_surnames.is_empty()
@@ -254,19 +222,10 @@ pub fn validate_authors(ref_authors: &[String], found_authors: &[String]) -> boo
             return true;
         }
 
-        // Last-name-first (LNF) citation style: some papers cite as
-        // "Surname Given, Surname Given, …" (no commas inside a name, no
-        // initials). get_last_name picks the *last* token, which is actually
-        // the given name in this order — so surname matching fails even
-        // though the authors are correct (e.g. "Ekparinya Parinya" vs DBLP's
-        // "Parinya Ekparinya").
-        //
-        // When both lists look like two-token proper-noun names without
-        // initials (the common ambiguous shape), also consider the *first*
-        // token as a candidate surname. We only take this branch as a
-        // fallback after direct surname comparison has failed, so it can't
-        // create false positives — any overlap surfaced here was invisible
-        // to the stricter checks above.
+        // Last-name-first style ("Ekparinya Parinya" vs DBLP's "Parinya
+        // Ekparinya"): when names are ambiguous two-token shapes, also
+        // accept first-token-vs-surname overlap. Only reached if the
+        // stricter checks above failed.
         if ref_authors.iter().all(|a| is_ambiguous_two_token(a))
             && found_authors.iter().any(|a| is_ambiguous_two_token(a))
         {
@@ -287,6 +246,11 @@ pub fn validate_authors(ref_authors: &[String], found_authors: &[String]) -> boo
 /// tokens, both begin with an uppercase letter, and neither is an initial or
 /// carries a period (i.e. we cannot tell Given-Family from Family-Given).
 fn is_ambiguous_two_token(name: &str) -> bool {
+    // AAAI form ("Smith, Jane") is unambiguous — the comma marks the
+    // surname — so it should never enter the LNF fallback.
+    if name.contains(',') {
+        return false;
+    }
     // split_whitespace already handles leading/trailing whitespace.
     let parts: Vec<&str> = name.split_whitespace().collect();
     if parts.len() != 2 {
@@ -380,6 +344,12 @@ fn strip_diacritics(s: &str) -> String {
 }
 
 /// Normalize an author name to "FirstInitial surname" format for comparison.
+///
+/// Kept for the unit tests that pin the legacy fingerprint format. The
+/// live matching path uses [`make_author_key`] / [`keys_compat`] instead,
+/// which preserves full first names so "Isaac Shi" no longer collides
+/// with "Ivy Shi".
+#[cfg(test)]
 fn normalize_author(name: &str) -> String {
     // Strip diacritics first so comparisons are accent-insensitive
     let name = strip_diacritics(name.trim());
@@ -441,6 +411,130 @@ fn get_last_name(name: &str) -> String {
     }
 
     get_surname_from_parts(&parts).to_lowercase()
+}
+
+/// Parsed author with separated surname and first-name component.
+/// Two keys are compatible iff surnames match AND first parts are
+/// compatible (see [`keys_compat`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthorKey {
+    surname: String,
+    first: FirstPart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FirstPart {
+    Full(String),
+    Initial(char),
+    None,
+}
+
+fn make_author_key(name: &str) -> Option<AuthorKey> {
+    let name = strip_diacritics(name.trim());
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    // AAAI "Surname, Initials" form.
+    if name.contains(',') {
+        let parts: Vec<&str> = name.splitn(2, ',').collect();
+        let surname = parts[0].trim().to_lowercase();
+        if surname.is_empty() {
+            return None;
+        }
+        let first_str = parts.get(1).map_or("", |s| s.trim());
+        let first = if first_str.is_empty() {
+            FirstPart::None
+        } else {
+            let token = first_str.split_whitespace().next().unwrap_or("");
+            parse_first_part(token)
+        };
+        return Some(AuthorKey { surname, first });
+    }
+
+    let raw_parts: Vec<&str> = name.split_whitespace().collect();
+    let parts = strip_dblp_suffix(&raw_parts);
+    if parts.is_empty() {
+        return None;
+    }
+
+    if parts.len() == 1 {
+        return Some(AuthorKey {
+            surname: parts[0].to_lowercase(),
+            first: FirstPart::None,
+        });
+    }
+
+    // Springer "Surname Initial" form.
+    let last = *parts.last().unwrap();
+    if last.len() <= 2 && last.chars().all(|c| c.is_uppercase()) {
+        let surname = parts[..parts.len() - 1].join(" ").to_lowercase();
+        let initial = last.chars().next().unwrap().to_ascii_lowercase();
+        return Some(AuthorKey {
+            surname,
+            first: FirstPart::Initial(initial),
+        });
+    }
+
+    let surname = get_surname_from_parts(&parts).to_lowercase();
+    if surname.is_empty() {
+        return None;
+    }
+    Some(AuthorKey {
+        surname,
+        first: parse_first_part(parts[0]),
+    })
+}
+
+fn parse_first_part(token: &str) -> FirstPart {
+    let token = token.trim();
+    if token.is_empty() {
+        return FirstPart::None;
+    }
+    let stripped = token.trim_end_matches('.');
+
+    if token.contains('.') {
+        return stripped
+            .chars()
+            .find(|c| c.is_alphabetic())
+            .map(|c| FirstPart::Initial(c.to_ascii_lowercase()))
+            .unwrap_or(FirstPart::None);
+    }
+
+    if stripped.len() <= 2 && stripped.chars().all(|c| c.is_uppercase()) {
+        return stripped
+            .chars()
+            .next()
+            .map(|c| FirstPart::Initial(c.to_ascii_lowercase()))
+            .unwrap_or(FirstPart::None);
+    }
+
+    if stripped.is_empty() {
+        FirstPart::None
+    } else {
+        FirstPart::Full(stripped.to_lowercase())
+    }
+}
+
+/// Surname-equal, first-part-compatible. `Full` vs `Full` requires
+/// equality (distinguishes Isaac/Ivy); `Full` vs `Initial` only checks
+/// the first letter (preserves "I. Shi" ↔ "Isaac Shi"); `None` on either
+/// side accepts the surname-only match.
+fn keys_compat(a: &AuthorKey, b: &AuthorKey) -> bool {
+    if a.surname.is_empty() || a.surname != b.surname {
+        return false;
+    }
+    match (&a.first, &b.first) {
+        (FirstPart::Full(x), FirstPart::Full(y)) => x == y,
+        (FirstPart::Full(f), FirstPart::Initial(i))
+        | (FirstPart::Initial(i), FirstPart::Full(f)) => f
+            .chars()
+            .next()
+            .is_some_and(|c| c.to_ascii_lowercase() == *i),
+        (FirstPart::Initial(x), FirstPart::Initial(y)) => x == y,
+        (FirstPart::None, _) | (_, FirstPart::None) => true,
+    }
 }
 
 /// Check if a name contains a first name or initial (not just a surname).
@@ -899,6 +993,217 @@ mod tests {
             &s(&["J. Smith"]),
             &s(&["Alice Kumar", "Robert Chen"]),
         ));
+    }
+
+    // ─── Full-first-name comparison (Isaac/Ivy class) ───
+
+    #[test]
+    fn test_full_first_names_with_shared_initial_mismatch() {
+        // Same surname, same first initial, different full first names.
+        // The classic AI-hallucination shape: real paper title, plausible
+        // co-author swapped for someone else whose name starts with the
+        // same letter.
+        assert!(!validate_authors(
+            &s(&["Isaac Shi"]),
+            &s(&["Ivy Shi"]),
+        ));
+        assert!(!validate_authors(
+            &s(&["Aaron Smith"]),
+            &s(&["Alan Smith"]),
+        ));
+        assert!(!validate_authors(
+            &s(&["Michael Chen"]),
+            &s(&["Maria Chen"]),
+        ));
+    }
+
+    #[test]
+    fn test_full_first_name_matches_initial_form() {
+        // The compatibility check must still accept the common
+        // initial-vs-full-name format pair so citations of "I. Shi" still
+        // verify against DB records of "Isaac Shi".
+        assert!(validate_authors(&s(&["I. Shi"]), &s(&["Isaac Shi"]),));
+        assert!(validate_authors(&s(&["Isaac Shi"]), &s(&["I. Shi"]),));
+    }
+
+    #[test]
+    fn test_full_first_names_equal_match() {
+        assert!(validate_authors(
+            &s(&["Isaac Shi"]),
+            &s(&["Isaac Shi", "Other Person"]),
+        ));
+    }
+
+    #[test]
+    fn test_surname_only_citation_still_matches_full() {
+        // If the citation gives only a surname, the strongest available
+        // signal is surname overlap — accept it.
+        assert!(validate_authors(
+            &s(&["Shi", "Jones"]),
+            &s(&["Isaac Shi", "Alice Jones"]),
+        ));
+    }
+
+    #[test]
+    fn test_full_first_name_accent_insensitive() {
+        // "Sören" vs "Soren" must still equate after diacritic stripping.
+        assert!(validate_authors(
+            &s(&["Sören Müller"]),
+            &s(&["Soren Muller"]),
+        ));
+        // ...but two different full first names sharing an initial must
+        // still mismatch even with accents in play.
+        assert!(!validate_authors(
+            &s(&["Sören Müller"]),
+            &s(&["Stefan Muller"]),
+        ));
+    }
+
+    #[test]
+    fn test_full_first_name_aaai_vs_full() {
+        // AAAI "Smith, John" against full "John Smith" still matches.
+        assert!(validate_authors(
+            &s(&["Smith, John"]),
+            &s(&["John Smith"]),
+        ));
+        // ...but "Smith, Jane" vs "John Smith" must not (same initial 'J',
+        // different full first names after disambiguation).
+        // Note: "Smith, J." vs "John Smith" should still match (initial
+        // form on one side).
+        assert!(validate_authors(
+            &s(&["Smith, J."]),
+            &s(&["John Smith"]),
+        ));
+        assert!(!validate_authors(
+            &s(&["Smith, Jane"]),
+            &s(&["John Smith"]),
+        ));
+    }
+
+    #[test]
+    fn test_full_first_name_different_surname_obvious_reject() {
+        // Sanity: full-name compat does nothing if surnames differ.
+        assert!(!validate_authors(
+            &s(&["Isaac Shi"]),
+            &s(&["Isaac Wong"]),
+        ));
+    }
+
+    // ─── Look-alike phantom detection (one bad author among good ones) ───
+
+    #[test]
+    fn test_lookalike_phantom_flags_mixed_citation() {
+        // Real JAMA 2024 paper "Projected changes in statin and
+        // antihypertensive therapy eligibility with the AHA PREVENT
+        // cardiovascular risk equations" (Diao et al.). The citation
+        // swaps "Ivy Shi" for "Isaac Shi" (same surname, same initial,
+        // wrong full first name) — the classic LLM-swap shape. Other
+        // cited authors are genuine, so the previous "any overlap →
+        // verified" rule would pass it. The look-alike check must trip.
+        assert!(!validate_authors(
+            &s(&[
+                "James A. Diao",
+                "Isaac Shi", // ← hallucinated
+                "Venkatesh L. Murthy",
+                "Puneet Batra",
+                "Amit V. Khera",
+            ]),
+            &s(&[
+                "James A. Diao",
+                "Ivy Shi",
+                "Venkatesh L. Murthy",
+                "Thomas A. Buckley",
+                "Chirag J. Patel",
+                "Emma Pierson",
+                "Robert W. Yeh",
+                "Dhruv S. Kazi",
+                "Rishi K. Wadhera",
+                "Arjun K. Manrai",
+            ]),
+        ));
+    }
+
+    #[test]
+    fn test_lookalike_phantom_requires_real_compat_match() {
+        // If NO cited author compat-matches a found author (just a bunch
+        // of surname collisions with all-wrong first names), don't fire
+        // the look-alike rule — the citation may simply be for a
+        // different paper, and the existing fallbacks handle it.
+        // Here: same surnames, all wrong first names, no other signal.
+        // (Returns false via "no compat" — covered below.)
+        assert!(!validate_authors(
+            &s(&["Alice Smith", "Bob Jones"]),
+            &s(&["Charlie Smith", "Dave Jones"]),
+        ));
+    }
+
+    #[test]
+    fn test_lookalike_only_unknown_surnames_still_verifies() {
+        // Cited authors whose surnames don't appear in the DB at all
+        // are "unknown" — not look-alikes. As long as at least one
+        // cited author compat-matches, the citation verifies. This
+        // preserves the et-al-truncation case where the citation lists
+        // only a couple of names from a longer roster.
+        assert!(validate_authors(
+            &s(&["Craig Gentry", "Some Unknown"]),
+            &s(&["Dan Boneh", "Craig Gentry"]),
+        ));
+    }
+
+    #[test]
+    fn test_lookalike_initial_form_does_not_trip() {
+        // "I. Shi" should compat-match "Isaac Shi" (initial vs full),
+        // not register as a look-alike. The whole citation should
+        // verify normally.
+        assert!(validate_authors(
+            &s(&["J. Diao", "I. Shi", "V. Murthy"]),
+            &s(&[
+                "James A. Diao",
+                "Isaac Shi",
+                "Venkatesh L. Murthy",
+            ]),
+        ));
+    }
+
+    #[test]
+    fn test_lookalike_full_first_name_typo_one_authoritative() {
+        // Just one good compat match plus one look-alike → flag.
+        // This is the minimum case the new rule catches.
+        assert!(!validate_authors(
+            &s(&["James Diao", "Isaac Shi"]),
+            &s(&["James Diao", "Ivy Shi"]),
+        ));
+    }
+
+    #[test]
+    fn test_make_author_key_parsing() {
+        // Direct unit tests for the new key extractor.
+        let k = make_author_key("Isaac Shi").unwrap();
+        assert_eq!(k.surname, "shi");
+        assert_eq!(k.first, FirstPart::Full("isaac".to_string()));
+
+        let k = make_author_key("I. Shi").unwrap();
+        assert_eq!(k.surname, "shi");
+        assert_eq!(k.first, FirstPart::Initial('i'));
+
+        let k = make_author_key("Shi").unwrap();
+        assert_eq!(k.surname, "shi");
+        assert_eq!(k.first, FirstPart::None);
+
+        // Multi-word surname preserved
+        let k = make_author_key("Jay Van Bavel").unwrap();
+        assert_eq!(k.surname, "van bavel");
+        assert_eq!(k.first, FirstPart::Full("jay".to_string()));
+
+        // AAAI form
+        let k = make_author_key("Bail, C. A.").unwrap();
+        assert_eq!(k.surname, "bail");
+        assert_eq!(k.first, FirstPart::Initial('c'));
+
+        // Springer trailing-initial form
+        let k = make_author_key("Abrahao S").unwrap();
+        assert_eq!(k.surname, "abrahao");
+        assert_eq!(k.first, FirstPart::Initial('s'));
     }
 
     #[test]
