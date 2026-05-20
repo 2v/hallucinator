@@ -42,12 +42,17 @@ struct CacheKey {
 /// What we store: either a found result or a not-found marker.
 #[derive(Clone, Debug)]
 enum CachedResult {
-    /// Paper found: title, authors, url, and optional retraction info.
     Found {
         title: String,
         authors: Vec<String>,
         url: Option<String>,
         retraction: Option<RetractionResult>,
+        journal: Option<String>,
+        year: Option<u16>,
+        volume: Option<String>,
+        issue: Option<String>,
+        pages: Option<String>,
+        doi: Option<String>,
     },
     /// Paper not found in this database.
     NotFound,
@@ -100,13 +105,28 @@ impl SqliteWriter {
                  paper_url        TEXT,
                  inserted_at      INTEGER NOT NULL,
                  retraction_json  TEXT,
+                 journal          TEXT,
+                 year             INTEGER,
+                 volume           TEXT,
+                 issue            TEXT,
+                 pages            TEXT,
+                 doi              TEXT,
                  PRIMARY KEY (normalized_title, db_name)
              );",
         )?;
-        // Migration: add retraction_json column to existing databases.
-        // ALTER TABLE ADD COLUMN is a no-op if the column already exists (SQLite
-        // returns "duplicate column name" error which we silently ignore).
-        let _ = conn.execute_batch("ALTER TABLE query_cache ADD COLUMN retraction_json TEXT");
+        // ALTER TABLE ADD COLUMN is a no-op if the column already exists
+        // (SQLite returns "duplicate column name" which we silently ignore).
+        for stmt in [
+            "ALTER TABLE query_cache ADD COLUMN retraction_json TEXT",
+            "ALTER TABLE query_cache ADD COLUMN journal TEXT",
+            "ALTER TABLE query_cache ADD COLUMN year INTEGER",
+            "ALTER TABLE query_cache ADD COLUMN volume TEXT",
+            "ALTER TABLE query_cache ADD COLUMN issue TEXT",
+            "ALTER TABLE query_cache ADD COLUMN pages TEXT",
+            "ALTER TABLE query_cache ADD COLUMN doi TEXT",
+        ] {
+            let _ = conn.execute_batch(stmt);
+        }
         // fp_overrides schema (v2): keyed by a composite identity
         // string derived from both title AND author set, not just
         // title. Title-only collision (same title, different authors)
@@ -160,12 +180,30 @@ impl SqliteWriter {
             )
             .ok();
 
-        let (found, found_title, authors_json, paper_url, retraction_json) = match result {
+        let (
+            found,
+            found_title,
+            authors_json,
+            paper_url,
+            retraction_json,
+            journal,
+            year,
+            volume,
+            issue,
+            pages,
+            doi,
+        ) = match result {
             CachedResult::Found {
                 title,
                 authors,
                 url,
                 retraction,
+                journal,
+                year,
+                volume,
+                issue,
+                pages,
+                doi,
             } => (
                 1i32,
                 Some(title.as_str()),
@@ -174,14 +212,20 @@ impl SqliteWriter {
                 retraction
                     .as_ref()
                     .and_then(|r| serde_json::to_string(r).ok()),
+                journal.as_deref(),
+                *year,
+                volume.as_deref(),
+                issue.as_deref(),
+                pages.as_deref(),
+                doi.as_deref(),
             ),
-            CachedResult::NotFound => (0i32, None, None, None, None),
+            CachedResult::NotFound => (0i32, None, None, None, None, None, None, None, None, None, None),
         };
 
         let _ = self.conn.execute(
             "INSERT OR REPLACE INTO query_cache
-                 (normalized_title, db_name, found, found_title, authors, paper_url, inserted_at, retraction_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (normalized_title, db_name, found, found_title, authors, paper_url, inserted_at, retraction_json, journal, year, volume, issue, pages, doi)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 norm_title,
                 db_name,
@@ -190,7 +234,13 @@ impl SqliteWriter {
                 authors_json,
                 paper_url,
                 epoch,
-                retraction_json
+                retraction_json,
+                journal,
+                year,
+                volume,
+                issue,
+                pages,
+                doi,
             ],
         );
 
@@ -367,7 +417,8 @@ impl ReadPool {
         let now = now_epoch();
         let mut stmt = conn
             .prepare_cached(
-                "SELECT found, found_title, authors, paper_url, inserted_at, retraction_json
+                "SELECT found, found_title, authors, paper_url, inserted_at, retraction_json,
+                        journal, year, volume, issue, pages, doi
                  FROM query_cache
                  WHERE normalized_title = ?1 AND db_name = ?2",
             )
@@ -375,24 +426,37 @@ impl ReadPool {
 
         let row = stmt
             .query_row(params![norm_title, db_name], |row| {
-                let found: i32 = row.get(0)?;
-                let found_title: Option<String> = row.get(1)?;
-                let authors_json: Option<String> = row.get(2)?;
-                let paper_url: Option<String> = row.get(3)?;
-                let inserted_at: u64 = row.get(4)?;
-                let retraction_json: Option<String> = row.get(5)?;
                 Ok((
-                    found,
-                    found_title,
-                    authors_json,
-                    paper_url,
-                    inserted_at,
-                    retraction_json,
+                    row.get::<_, i32>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, u64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<u16>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             })
             .ok()?;
 
-        let (found, found_title, authors_json, paper_url, inserted_at, retraction_json) = row;
+        let (
+            found,
+            found_title,
+            authors_json,
+            paper_url,
+            inserted_at,
+            retraction_json,
+            journal,
+            year,
+            volume,
+            issue,
+            pages,
+            doi,
+        ) = row;
 
         let result = if found != 0 {
             CachedResult::Found {
@@ -402,6 +466,12 @@ impl ReadPool {
                     .unwrap_or_default(),
                 url: paper_url,
                 retraction: retraction_json.and_then(|j| serde_json::from_str(&j).ok()),
+                journal,
+                year,
+                volume,
+                issue,
+                pages,
+                doi,
             }
         } else {
             CachedResult::NotFound
@@ -755,6 +825,12 @@ impl QueryCache {
                 authors: result.authors.clone(),
                 url: result.paper_url.clone(),
                 retraction: result.retraction.clone(),
+                journal: result.journal.clone(),
+                year: result.year,
+                volume: result.volume.clone(),
+                issue: result.issue.clone(),
+                pages: result.pages.clone(),
+                doi: result.doi.clone(),
             }
         } else {
             CachedResult::NotFound
@@ -1089,12 +1165,24 @@ fn cached_to_query_result(cached: &CachedResult) -> DbQueryResult {
             authors,
             url,
             retraction,
+            journal,
+            year,
+            volume,
+            issue,
+            pages,
+            doi,
         } => DbQueryResult {
             found_title: Some(title.clone()),
             authors: authors.clone(),
             paper_url: url.clone(),
             retraction: retraction.clone(),
-            source_label: None,
+            journal: journal.clone(),
+            year: *year,
+            volume: volume.clone(),
+            issue: issue.clone(),
+            pages: pages.clone(),
+            doi: doi.clone(),
+            ..DbQueryResult::default()
         },
         CachedResult::NotFound => DbQueryResult::not_found(),
     }
