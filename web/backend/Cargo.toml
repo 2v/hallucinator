@@ -1,0 +1,40 @@
+[package]
+name = "hallucinator-api"
+version = "0.2.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "HTTP JSON API for the hallucinator reference validator"
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+hallucinator-core = { path = "../../hallucinator-rs/crates/hallucinator-core" }
+hallucinator-parsing = { path = "../../hallucinator-rs/crates/hallucinator-parsing" }
+hallucinator-pdf-mupdf = { path = "../../hallucinator-rs/crates/hallucinator-pdf-mupdf" }
+hallucinator-ingest = { path = "../../hallucinator-rs/crates/hallucinator-ingest" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "fs"] }
+tokio-util = "0.7"
+tokio-stream = "0.1"
+futures-util = "0.3"
+
+axum = { version = "0.8", features = ["multipart"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+dashmap = "6"
+uuid = { version = "1", features = ["v4", "serde"] }
+anyhow = "1"
+thiserror = "2"
+tempfile = "3"
+
+[[bin]]
+name = "hallucinator-api"
+path = "src/main.rs"
