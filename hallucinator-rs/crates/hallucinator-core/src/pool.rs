@@ -14,6 +14,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::authors::validate_authors;
+
+const RICH_DBS: &[&str] = &["OpenAlex", "CrossRef"];
+
+fn is_rich_db(name: &str) -> bool {
+    RICH_DBS.contains(&name)
+}
 use crate::db::DatabaseBackend;
 use crate::db::searxng::Searxng;
 use crate::db::url_check::{UrlChecker, expand_url_variants};
@@ -206,6 +212,7 @@ struct AggState {
     retraction: Option<crate::retraction::RetractionResult>,
 }
 
+#[derive(Clone)]
 struct VerifiedInfo {
     source: String,
     found_authors: Vec<String>,
@@ -346,8 +353,13 @@ async fn report_result(
             let paper_url = &qr.paper_url;
             let ref_authors = &collector.reference.authors;
             if ref_authors.is_empty() || validate_authors(ref_authors, found_authors) {
-                // Verified — set flag so other drainers can skip
-                collector.verified.store(true, Ordering::Release);
+                // Only rich DBs (OpenAlex / CrossRef) can finalize alone.
+                // Setting `verified` here causes sibling drainers to skip
+                // their next job — so a non-rich verifier must not set it,
+                // since a rich DB may still catch a look-alike phantom.
+                if is_rich_db(db_name) {
+                    collector.verified.store(true, Ordering::Release);
+                }
 
                 (collector.progress)(ProgressEvent::DatabaseQueryComplete {
                     paper_index: 0,
@@ -366,7 +378,15 @@ async fn report_result(
                     paper_url: paper_url.clone(),
                     error_message: None,
                 });
-                if state.verified_info.is_none() {
+                // Prefer the first rich verification; otherwise just keep
+                // the first verified we saw.
+                let should_store = match &state.verified_info {
+                    None => true,
+                    Some(existing) => {
+                        is_rich_db(db_name) && !is_rich_db(&existing.source)
+                    }
+                };
+                if should_store {
                     state.verified_info = Some(VerifiedInfo {
                         source: qr
                             .source_label
@@ -769,7 +789,15 @@ async fn finalize_collector(collector: &RefCollector) {
     ) = {
         let state = collector.state.lock().unwrap_or_else(|e| e.into_inner());
 
-        if let Some(ref v) = state.verified_info {
+        // Precedence: rich-DB verified > mismatch (caught by a rich DB
+        // that could disambiguate look-alikes) > any verified > NotFound.
+        let rich_verified = state
+            .verified_info
+            .as_ref()
+            .map(|v| is_rich_db(&v.source))
+            .unwrap_or(false);
+        if rich_verified {
+            let v = state.verified_info.as_ref().unwrap();
             (
                 Status::Verified,
                 Some(v.source.clone()),
@@ -788,6 +816,16 @@ async fn finalize_collector(collector: &RefCollector) {
                 state.failed_dbs.clone(),
                 state.db_results.clone(),
                 None,
+            )
+        } else if let Some(ref v) = state.verified_info {
+            (
+                Status::Verified,
+                Some(v.source.clone()),
+                v.found_authors.clone(),
+                v.paper_url.clone(),
+                state.failed_dbs.clone(),
+                state.db_results.clone(),
+                state.retraction.clone(),
             )
         } else {
             (
@@ -1006,7 +1044,13 @@ fn pre_check_remote_cache(
                         paper_url: qr.paper_url.clone(),
                         error_message: None,
                     });
-                    if verified_info.is_none() {
+                    let should_store = match &verified_info {
+                        None => true,
+                        Some(existing) => {
+                            is_rich_db(db_name) && !is_rich_db(&existing.source)
+                        }
+                    };
+                    if should_store {
                         verified_info = Some(VerifiedInfo {
                             source: qr.source_label.clone().unwrap_or_else(|| db_name.clone()),
                             found_authors: qr.authors,
@@ -1217,8 +1261,15 @@ async fn coordinator_loop(
             }
         }
 
-        // If verified from cache, skip all drainers
-        if let Some(verified) = pre.verified_info {
+        // Only a cached rich-DB verification can finalize without
+        // fanning out — others need rich DBs to weigh in for look-alike
+        // detection.
+        if let Some(verified) = pre
+            .verified_info
+            .as_ref()
+            .filter(|v| is_rich_db(&v.source))
+            .cloned()
+        {
             // Emit Skipped for cache-miss DBs (they won't be queried either)
             for &i in &pre.miss_indices {
                 db_complete_cb(DbResult {
@@ -1310,12 +1361,21 @@ async fn coordinator_loop(
                 }
             });
 
+            // Rich-DB verified short-circuited above; remaining order
+            // is mismatch > any cached verified > NotFound.
             let (status, source, found_authors, paper_url) = if let Some(m) = first_mismatch {
                 (
                     Status::Mismatch(MismatchKind::AUTHOR),
                     Some(m.source),
                     m.found_authors,
                     m.paper_url,
+                )
+            } else if let Some(v) = pre.verified_info {
+                (
+                    Status::Verified,
+                    Some(v.source),
+                    v.found_authors,
+                    v.paper_url,
                 )
             } else {
                 (Status::NotFound, None, vec![], None)
@@ -1379,6 +1439,10 @@ async fn coordinator_loop(
             }
         });
 
+        // Carry any non-rich cached verification forward; rich-DB
+        // cache hits would have short-circuited above.
+        let seed_verified = pre.verified_info;
+
         let collector = Arc::new(RefCollector {
             reference,
             ref_index,
@@ -1390,7 +1454,7 @@ async fn coordinator_loop(
             remaining: AtomicUsize::new(pre.miss_indices.len()),
             verified: AtomicBool::new(false),
             state: Mutex::new(AggState {
-                verified_info: None,
+                verified_info: seed_verified,
                 first_mismatch,
                 failed_dbs: vec![],
                 db_results: pre.db_results,

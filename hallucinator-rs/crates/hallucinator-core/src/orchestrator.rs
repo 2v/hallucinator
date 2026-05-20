@@ -1,4 +1,14 @@
 use crate::authors::validate_authors;
+
+/// Databases with full-name author data that can disambiguate look-alike
+/// phantoms (e.g. "Isaac Shi" vs "Ivy Shi"). A verified result from one
+/// of these can finalize a reference; verifications from other DBs must
+/// wait for these to weigh in.
+const RICH_DBS: &[&str] = &["OpenAlex", "CrossRef"];
+
+fn is_rich_db(name: &str) -> bool {
+    RICH_DBS.contains(&name)
+}
 use crate::db::DatabaseBackend;
 use crate::rate_limit;
 use crate::{Config, DbResult, DbStatus, MismatchKind, Status};
@@ -84,29 +94,23 @@ pub async fn query_local_databases(
         return empty_result();
     }
 
-    let (local_dbs, remote_dbs): (Vec<_>, Vec<_>) =
+    let (local_dbs, _remote_dbs): (Vec<_>, Vec<_>) =
         all_databases.into_iter().partition(|db| db.is_local());
-
-    // All DB names for Skipped tracking on early exit
-    let all_db_names: HashSet<String> = local_dbs
-        .iter()
-        .chain(remote_dbs.iter())
-        .map(|db| db.name().to_string())
-        .collect();
 
     let rate_limiters = config.rate_limiters.clone();
     let max_retries = config.max_rate_limit_retries;
     let cache = config.query_cache.as_deref();
 
     let mut first_mismatch: Option<DbSearchResult> = None;
+    let mut pending_verified: Option<DbSearchResult> = None;
     let mut failed_dbs = Vec::new();
     let mut db_results: Vec<DbResult> = Vec::new();
     let mut completed_db_names: HashSet<String> = HashSet::new();
 
+    // Local DBs are never rich, so a local verify is always pending — it
+    // must wait for the remote phase to give OpenAlex / CrossRef a chance.
     for db in &local_dbs {
         let name = db.name().to_string();
-        // Forward ref_authors so DBLP's author-aware tie-breaking can pick
-        // the right record when several DBLP entries share a title.
         let rl_result = rate_limit::query_with_retry_with_authors(
             db.as_ref(),
             title,
@@ -121,7 +125,7 @@ pub async fn query_local_databases(
         let elapsed = rl_result.elapsed;
         completed_db_names.insert(name.clone());
 
-        match process_query_result(
+        if let Some(verified) = process_query_result(
             name,
             rl_result.result,
             elapsed,
@@ -132,28 +136,19 @@ pub async fn query_local_databases(
             &mut db_results,
             &mut failed_dbs,
             &mut first_mismatch,
-        ) {
-            Some(verified) => {
-                // Mark all remaining DBs as Skipped
-                emit_skipped(
-                    &all_db_names,
-                    &completed_db_names,
-                    on_db_complete,
-                    &mut db_results,
-                );
-                return DbSearchResult {
-                    db_results,
-                    ..verified
-                };
-            }
-            None => continue,
+        ) && pending_verified.is_none()
+        {
+            pending_verified = Some(verified);
         }
     }
 
-    // No local match — return partial result for remote phase to continue from
     if let Some(mut mismatch) = first_mismatch {
         mismatch.db_results = db_results;
         return mismatch;
+    }
+    if let Some(mut v) = pending_verified {
+        v.db_results = db_results;
+        return v;
     }
 
     DbSearchResult {
@@ -214,15 +209,42 @@ pub async fn query_remote_databases(
         } else {
             None
         };
+    // A Verified status from the local phase comes from a non-rich DB
+    // (local DBs are never rich), so carry it as pending — let the remote
+    // rich DBs weigh in before finalizing.
+    let mut pending_verified: Option<DbSearchResult> =
+        if local_result.status == Status::Verified {
+            Some(DbSearchResult {
+                db_results: vec![],
+                ..local_result.clone()
+            })
+        } else {
+            None
+        };
     let mut failed_dbs = local_result.failed_dbs;
     let mut db_results = local_result.db_results;
     let mut completed_db_names: HashSet<String> =
         db_results.iter().map(|r| r.db_name.clone()).collect();
 
+    // Track which rich DBs we still expect to hear from. A non-rich
+    // verified result is only conclusive once this set is empty.
+    let mut rich_pending: HashSet<String> = RICH_DBS
+        .iter()
+        .map(|s| s.to_string())
+        .filter(|name| {
+            remote_dbs.iter().any(|db| db.name() == name)
+                && !completed_db_names.contains(name)
+        })
+        .collect();
+
     if remote_dbs.is_empty() {
         if let Some(mut mismatch) = first_mismatch {
             mismatch.db_results = db_results;
             return mismatch;
+        }
+        if let Some(mut v) = pending_verified {
+            v.db_results = db_results;
+            return v;
         }
         return DbSearchResult {
             status: Status::NotFound,
@@ -235,10 +257,9 @@ pub async fn query_remote_databases(
         };
     }
 
-    // --- Cache pre-check for all remote DBs ---
-    // Check cache synchronously before spawning concurrent tasks to avoid
-    // the race where a fast task returns Verified and aborts others before
-    // they can cache their results.
+    // Cache pre-check before spawning concurrent tasks — avoids a race
+    // where a fast task returns Verified and aborts others before they
+    // can cache their results.
     let mut cache_miss_dbs: Vec<&Arc<dyn DatabaseBackend>> = Vec::new();
     for db in &remote_dbs {
         let name = db.name().to_string();
@@ -246,8 +267,9 @@ pub async fn query_remote_databases(
 
         if let Some(cached_result) = cached {
             completed_db_names.insert(name.clone());
+            rich_pending.remove(&name);
             if let Some(verified) = process_query_result(
-                name,
+                name.clone(),
                 Ok(cached_result),
                 Duration::ZERO,
                 title,
@@ -258,23 +280,27 @@ pub async fn query_remote_databases(
                 &mut failed_dbs,
                 &mut first_mismatch,
             ) {
-                emit_skipped(
-                    &all_db_names,
-                    &completed_db_names,
-                    on_db_complete,
-                    &mut db_results,
-                );
-                return DbSearchResult {
-                    db_results,
-                    ..verified
-                };
+                if is_rich_db(&name) || rich_pending.is_empty() {
+                    emit_skipped(
+                        &all_db_names,
+                        &completed_db_names,
+                        on_db_complete,
+                        &mut db_results,
+                    );
+                    return DbSearchResult {
+                        db_results,
+                        ..verified
+                    };
+                }
+                if pending_verified.is_none() {
+                    pending_verified = Some(verified);
+                }
             }
         } else {
             cache_miss_dbs.push(db);
         }
     }
 
-    // Spawn only cache-miss DBs concurrently
     let mut join_set = tokio::task::JoinSet::new();
 
     for db in cache_miss_dbs {
@@ -309,9 +335,10 @@ pub async fn query_remote_databases(
         };
 
         completed_db_names.insert(name.clone());
+        rich_pending.remove(&name);
 
-        match process_query_result(
-            name,
+        if let Some(verified) = process_query_result(
+            name.clone(),
             query_result,
             elapsed,
             title,
@@ -322,7 +349,7 @@ pub async fn query_remote_databases(
             &mut failed_dbs,
             &mut first_mismatch,
         ) {
-            Some(verified) => {
+            if is_rich_db(&name) || rich_pending.is_empty() {
                 join_set.abort_all();
                 emit_skipped(
                     &all_db_names,
@@ -335,13 +362,19 @@ pub async fn query_remote_databases(
                     ..verified
                 };
             }
-            None => continue,
+            if pending_verified.is_none() {
+                pending_verified = Some(verified);
+            }
         }
     }
 
     if let Some(mut mismatch) = first_mismatch {
         mismatch.db_results = db_results;
         return mismatch;
+    }
+    if let Some(mut v) = pending_verified {
+        v.db_results = db_results;
+        return v;
     }
 
     DbSearchResult {
@@ -383,8 +416,9 @@ fn empty_result() -> DbSearchResult {
 /// more likely than a genuine author mismatch.
 const SHORT_TITLE_WORD_THRESHOLD: usize = 6;
 
-/// Process a single DB query result. Returns `Some(verified_result)` on match,
-/// `None` to continue checking other DBs.
+/// Process a single DB query result. Returns `Some(verified)` if this DB
+/// verified, regardless of whether the caller should early-exit; the
+/// caller (which knows which DBs are still pending) decides that.
 #[allow(clippy::too_many_arguments)]
 fn process_query_result(
     name: String,
@@ -404,12 +438,8 @@ fn process_query_result(
             let paper_url = qr.paper_url.clone();
             let retraction = qr.retraction.clone();
 
-            // Some databases legitimately return a title match with no authors:
-            //   - Web Search (SearxNG) never provides author data.
-            //   - DBLP sometimes stores authorless records for handbook chapters
-            //     and anonymised/organisational entries (e.g. `journals/ccr/X12`).
-            // In both cases we accept the title-only verification rather than
-            // forcing an AuthorMismatch that would mask a real match.
+            // Web Search has no author data; DBLP authorless records are
+            // anonymised entries. Both are accepted as title-only matches.
             let skip_author_check =
                 (name == "Web Search" || name == "DBLP") && found_authors.is_empty();
             if ref_authors.is_empty()
@@ -435,7 +465,7 @@ fn process_query_result(
                     found_authors,
                     paper_url,
                     failed_dbs: vec![],
-                    db_results: vec![], // caller fills this in
+                    db_results: vec![],
                     retraction,
                 });
             } else {
@@ -452,15 +482,12 @@ fn process_query_result(
                 }
                 db_results.push(db_result);
 
-                // For short/ambiguous titles, suppress author mismatch — a title-only
-                // match on a short title is unreliable (likely a different paper with
-                // the same common title like "Gemma", "Sentience", "Interactions").
                 let is_short_title = title.split_whitespace().count() < SHORT_TITLE_WORD_THRESHOLD;
 
-                // Also suppress mismatch when there is zero surname overlap
-                // from fuzzy-matching databases. This prevents false mismatches
-                // where CrossRef/Semantic Scholar/Europe PMC return a completely
-                // different paper that happens to have a similar title.
+                // Fuzzy DBs (CrossRef, Europe PMC, PubMed) sometimes return
+                // a different paper with a similar title. Zero surname
+                // overlap is a strong "wrong paper" signal; suppress the
+                // mismatch in that case so we don't blame the citation.
                 let zero_overlap = if !ref_authors.is_empty() && !found_authors.is_empty() {
                     let ref_surnames: HashSet<String> = ref_authors
                         .iter()
@@ -481,7 +508,6 @@ fn process_query_result(
                     false
                 };
 
-                // Suppress for fuzzy DBs with zero overlap - likely wrong paper
                 let is_fuzzy_db = matches!(
                     name.as_str(),
                     "CrossRef" | "Semantic Scholar" | "Europe PMC" | "PubMed"
@@ -821,7 +847,7 @@ mod tests {
 
         while let Some(result) = join_set.join_next().await {
             let (name, query_result, ref_authors, elapsed) = result.unwrap();
-            match process_query_result(
+            if let Some(verified) = process_query_result(
                 name,
                 query_result,
                 elapsed,
@@ -833,13 +859,10 @@ mod tests {
                 &mut failed_dbs,
                 &mut first_mismatch,
             ) {
-                Some(verified) => {
-                    return DbSearchResult {
-                        db_results,
-                        ..verified
-                    };
-                }
-                None => continue,
+                return DbSearchResult {
+                    db_results,
+                    ..verified
+                };
             }
         }
 
