@@ -219,3 +219,8 @@ test-data/
 
 # Windows artifacts
 nul
+
+# Local secrets and test artifacts
+config.ini
+kaggle.json
+test_manuscript.pdf
