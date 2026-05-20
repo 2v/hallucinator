@@ -1532,6 +1532,7 @@ mod tests {
             arxiv_info: None,
             retraction_info: None,
             url_check_skipped: false,
+            report: None,
         }
     }
 

@@ -60,7 +60,7 @@ pub mod retraction;
 pub mod text_utils;
 
 // Re-export for convenience
-pub use backend::{BackendError, PdfBackend};
+pub use backend::{BBox, BackendError, PdfBackend, PdfLocation};
 pub use cache::{DEFAULT_NEGATIVE_TTL, DEFAULT_POSITIVE_TTL, QueryCache};
 pub use orchestrator::{DbSearchResult, query_all_databases};
 pub use rate_limit::{DbQueryError, RateLimitedResult, RateLimiters};
@@ -86,6 +86,12 @@ pub struct Reference {
     pub volume: Option<String>,
     pub issue: Option<String>,
     pub pages: Option<String>,
+    /// 0-based page index in the source PDF where this reference appears.
+    /// None for non-PDF sources (BibTeX, GROBID, BBL) or when located unsuccessfully.
+    pub page_number: Option<usize>,
+    /// Line bounding boxes for the reference text on `page_number`, in PDF points
+    /// (top-left origin). Multi-line refs have multiple boxes. Empty if not located.
+    pub bboxes: Vec<crate::backend::BBox>,
 }
 
 /// Statistics about references that were skipped during extraction.

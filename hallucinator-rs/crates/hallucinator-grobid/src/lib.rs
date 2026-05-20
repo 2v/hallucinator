@@ -123,6 +123,8 @@ pub fn extract_references_from_grobid_str(content: &str) -> Result<ExtractionRes
             volume: entry.volume.clone(),
             issue: entry.issue.clone(),
             pages: entry.pages.clone(),
+            page_number: None,
+            bboxes: Vec::new(),
         });
     }
 

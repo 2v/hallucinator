@@ -11,3 +11,6 @@ dist = false
 [dependencies]
 hallucinator-core.workspace = true
 mupdf.workspace = true
+
+[dev-dependencies]
+hallucinator-parsing.workspace = true

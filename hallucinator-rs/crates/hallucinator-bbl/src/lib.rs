@@ -353,6 +353,8 @@ fn process_bib_entries(entries: &[&biblatex::Entry]) -> ExtractionResult {
             volume,
             issue,
             pages,
+            page_number: None,
+            bboxes: Vec::new(),
         });
     }
 

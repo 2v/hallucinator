@@ -78,6 +78,41 @@ impl ReferenceExtractor {
         self.extract_references_from_text(&text)
     }
 
+    /// Same as [`extract_references_via_backend`] but additionally locates each
+    /// parsed reference in the PDF (page + line bounding boxes). Search uses
+    /// the reference title when available, falling back to the raw citation.
+    /// References that fail to locate keep `page_number: None` and empty
+    /// `bboxes`.
+    pub fn extract_references_with_locations(
+        &self,
+        pdf_path: &Path,
+        backend: &dyn PdfBackend,
+    ) -> Result<ExtractionResult, ParsingError> {
+        let text = backend.extract_text(pdf_path)?;
+        let mut result = self.extract_references_from_text(&text)?;
+
+        let needles: Vec<&str> = result
+            .references
+            .iter()
+            .map(|r| {
+                r.title
+                    .as_deref()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or(&r.raw_citation)
+            })
+            .collect();
+        let locations = backend
+            .locate_strings(pdf_path, &needles)
+            .map_err(ParsingError::from)?;
+        for (r, loc) in result.references.iter_mut().zip(locations) {
+            if let Some(loc) = loc {
+                r.page_number = Some(loc.page);
+                r.bboxes = loc.bboxes;
+            }
+        }
+        Ok(result)
+    }
+
     /// Locate the references section in document text (step 2).
     pub fn find_references_section(&self, text: &str) -> Option<String> {
         section::find_references_section_with_config(text, &self.config)
