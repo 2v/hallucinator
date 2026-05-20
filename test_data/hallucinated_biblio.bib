@@ -1,0 +1,125 @@
+% Test fixture: real papers from test_manuscript.pdf with one
+% bibliographic field hallucinated each. All title+author pairs are
+% correct, so the current tool verifies them. A bibliographic-field
+% checker would catch each one.
+%
+% Source of ground truth: OpenAlex / CrossRef as of 2026-05-20.
+
+% ─── Year hallucinations ──────────────────────────────────────────
+
+% Real: 2024. Off-by-one year — extremely common LLM error.
+@article{diao2024_wrong_year,
+  author  = {James A. Diao and Ivy Shi and Venkatesh L. Murthy and Thomas A. Buckley and Chirag J. Patel and Emma Pierson and Robert W. Yeh and Dhruv S. Kazi and Rishi K. Wadhera and Arjun K. Manrai},
+  title   = {Projected changes in statin and antihypertensive therapy eligibility with the AHA PREVENT cardiovascular risk equations},
+  journal = {JAMA},
+  volume  = {332},
+  number  = {12},
+  pages   = {989--1000},
+  year    = {2023}
+}
+
+% Real: 2014. Off-by-two year.
+@article{muntner2014_wrong_year,
+  author  = {Paul Muntner and Lisandro D. Colantonio and Mary Cushman and David C. Goff and George Howard and Virginia J. Howard and Brett Kissela and Emily B. Levitan and Donald M. Lloyd-Jones and Monika M. Safford},
+  title   = {Validation of the atherosclerotic cardiovascular disease Pooled Cohort Risk Equations},
+  journal = {JAMA},
+  volume  = {311},
+  number  = {14},
+  pages   = {1406--1415},
+  year    = {2016}
+}
+
+% ─── Journal hallucinations ───────────────────────────────────────
+
+% Real journal: JAMA. Swapped to a plausibly-related venue.
+@article{diao2024_wrong_journal,
+  author  = {James A. Diao and Ivy Shi and Venkatesh L. Murthy and Thomas A. Buckley and Chirag J. Patel and Emma Pierson and Robert W. Yeh and Dhruv S. Kazi and Rishi K. Wadhera and Arjun K. Manrai},
+  title   = {Projected changes in statin and antihypertensive therapy eligibility with the AHA PREVENT cardiovascular risk equations},
+  journal = {New England Journal of Medicine},
+  volume  = {332},
+  number  = {12},
+  pages   = {989--1000},
+  year    = {2024}
+}
+
+% Real journal: Annals of Internal Medicine. Swapped to JAMA Intern Med
+% (similar abbreviation, both internal medicine journals — classic LLM
+% confusion). Authors here are CORRECT so the existing author check
+% passes; only the wrong journal field is the issue.
+@article{kim2023_wrong_journal,
+  author  = {Casey Kim and Jeremy B. Sussman and Kenneth J. Mukamal and Melissa Eades and Timothy S. Anderson},
+  title   = {Trends in primary prevention statin use by cardiovascular risk score from 1998 to 2018: a repeated cross-sectional study},
+  journal = {JAMA Internal Medicine},
+  volume  = {176},
+  number  = {12},
+  pages   = {1684--1688},
+  year    = {2023}
+}
+
+% ─── Volume / Issue hallucinations ────────────────────────────────
+
+% Real volume: 332. Off-by-one volume.
+@article{diao2024_wrong_volume,
+  author  = {James A. Diao and Ivy Shi and Venkatesh L. Murthy and Thomas A. Buckley and Chirag J. Patel and Emma Pierson and Robert W. Yeh and Dhruv S. Kazi and Rishi K. Wadhera and Arjun K. Manrai},
+  title   = {Projected changes in statin and antihypertensive therapy eligibility with the AHA PREVENT cardiovascular risk equations},
+  journal = {JAMA},
+  volume  = {331},
+  number  = {12},
+  pages   = {989--1000},
+  year    = {2024}
+}
+
+% ─── Page-number hallucinations ───────────────────────────────────
+
+% Real pages: 989-1000. Digit-insertion shift (one of the most common
+% LLM errors — prepends a digit to make the range look plausible).
+@article{diao2024_wrong_pages_shift,
+  author  = {James A. Diao and Ivy Shi and Venkatesh L. Murthy and Thomas A. Buckley and Chirag J. Patel and Emma Pierson and Robert W. Yeh and Dhruv S. Kazi and Rishi K. Wadhera and Arjun K. Manrai},
+  title   = {Projected changes in statin and antihypertensive therapy eligibility with the AHA PREVENT cardiovascular risk equations},
+  journal = {JAMA},
+  volume  = {332},
+  number  = {12},
+  pages   = {1989--2000},
+  year    = {2024}
+}
+
+% Real pages: 1406-1415. Off-by-one start page.
+@article{muntner2014_wrong_pages,
+  author  = {Paul Muntner and Lisandro D. Colantonio and Mary Cushman and David C. Goff and George Howard and Virginia J. Howard and Brett Kissela and Emily B. Levitan and Donald M. Lloyd-Jones and Monika M. Safford},
+  title   = {Validation of the atherosclerotic cardiovascular disease Pooled Cohort Risk Equations},
+  journal = {JAMA},
+  volume  = {311},
+  number  = {14},
+  pages   = {1407--1416},
+  year    = {2014}
+}
+
+% ─── Compound hallucination ───────────────────────────────────────
+
+% Real: Annals of Internal Medicine, vol 176, issue 8, pp 1057-1066.
+% Hallucinates volume, issue, AND pages — title+authors still correct.
+% Worst-case LLM citation: hallucinates everything that isn't the
+% headline title or author list.
+@article{frank2023_fully_hallucinated_biblio,
+  author  = {David A. Frank and Amber E. Johnson and Leslie R. M. Hausmann and Walid F. Gellad and Eric T. Roberts and Ravy K. Vajravelu},
+  title   = {Disparities in guideline-recommended statin use for prevention of atherosclerotic cardiovascular disease by race, ethnicity, and gender},
+  journal = {Annals of Internal Medicine},
+  volume  = {175},
+  number  = {3},
+  pages   = {412--421},
+  year    = {2023}
+}
+
+% ─── Negative control (everything correct) ────────────────────────
+
+% All fields correct — should verify cleanly. Used to confirm the
+% checker doesn't false-positive on valid citations.
+@article{kim2023_correct,
+  author  = {Casey Kim and Jeremy B. Sussman and Kenneth J. Mukamal and Melissa Eades and Timothy S. Anderson},
+  title   = {Trends in primary prevention statin use by cardiovascular risk score from 1998 to 2018: a repeated cross-sectional study},
+  journal = {Annals of Internal Medicine},
+  volume  = {176},
+  number  = {12},
+  pages   = {1684--1688},
+  year    = {2023}
+}
