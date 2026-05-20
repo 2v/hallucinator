@@ -73,7 +73,36 @@ impl DatabaseBackend for OpenAlex {
                         .map(String::from)
                         .or_else(|| item["id"].as_str().map(String::from));
 
-                    return Ok(DbQueryResult::found(found_title, authors, paper_url));
+                    let journal = item["primary_location"]["source"]["display_name"]
+                        .as_str()
+                        .map(String::from);
+                    let year = item["publication_year"].as_u64().and_then(|y| u16::try_from(y).ok());
+                    let volume = item["biblio"]["volume"].as_str().map(String::from);
+                    let issue = item["biblio"]["issue"].as_str().map(String::from);
+                    let first = item["biblio"]["first_page"].as_str();
+                    let last = item["biblio"]["last_page"].as_str();
+                    let pages = match (first, last) {
+                        (Some(f), Some(l)) if f != l => Some(format!("{}-{}", f, l)),
+                        (Some(f), _) => Some(f.to_string()),
+                        _ => None,
+                    };
+                    // OpenAlex DOI URL like "https://doi.org/10.xxxx" — strip prefix.
+                    let doi = item["doi"]
+                        .as_str()
+                        .map(|d| d.trim_start_matches("https://doi.org/").to_string());
+
+                    return Ok(DbQueryResult {
+                        found_title: Some(found_title.to_string()),
+                        authors,
+                        paper_url,
+                        journal,
+                        year,
+                        volume,
+                        issue,
+                        pages,
+                        doi,
+                        ..DbQueryResult::default()
+                    });
                 }
             }
 

@@ -44,6 +44,13 @@ pub struct DbQueryResult {
     /// Optional override for the source label shown in results.
     /// When set, the pool uses this instead of `db.name()` (e.g., "Standards (pattern)").
     pub source_label: Option<String>,
+    pub journal: Option<String>,
+    pub year: Option<u16>,
+    pub volume: Option<String>,
+    pub issue: Option<String>,
+    pub pages: Option<String>,
+    /// DOI as returned by the DB. Used by validate_biblio to flag DOI mismatches.
+    pub doi: Option<String>,
 }
 
 impl DbQueryResult {
@@ -53,8 +60,7 @@ impl DbQueryResult {
             found_title: Some(title.into()),
             authors,
             paper_url: url,
-            retraction: None,
-            source_label: None,
+            ..Self::default()
         }
     }
 
@@ -69,20 +75,14 @@ impl DbQueryResult {
             found_title: Some(title.into()),
             authors,
             paper_url: url,
-            retraction: None,
             source_label: Some(source_label.into()),
+            ..Self::default()
         }
     }
 
     /// Construct a "not found" result.
     pub fn not_found() -> Self {
-        Self {
-            found_title: None,
-            authors: Vec::new(),
-            paper_url: None,
-            retraction: None,
-            source_label: None,
-        }
+        Self::default()
     }
 
     /// Whether this result represents a found paper.

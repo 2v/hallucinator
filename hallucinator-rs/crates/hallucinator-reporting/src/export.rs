@@ -364,7 +364,16 @@ pub fn export_json(
                     entry.push_str(", ");
                 }
             }
-            entry.push_str("]\n");
+            entry.push_str("],\n");
+
+            // Per-field validation report (None when not populated).
+            match &r.report {
+                Some(rep) => match serde_json::to_string(rep) {
+                    Ok(s) => entry.push_str(&format!("        \"report\": {}\n", s)),
+                    Err(_) => entry.push_str("        \"report\": null\n"),
+                },
+                None => entry.push_str("        \"report\": null\n"),
+            }
             entry.push_str("      }");
             entries.push(entry);
         }

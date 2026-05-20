@@ -137,18 +137,36 @@ impl DatabaseBackend for CrossRef {
                         }
                     }
 
-                    let doi = item["DOI"].as_str();
-                    let paper_url = doi.map(|d| format!("https://doi.org/{}", d));
+                    let doi_str = item["DOI"].as_str().map(String::from);
+                    let paper_url = doi_str.as_ref().map(|d| format!("https://doi.org/{}", d));
 
-                    // Extract retraction info inline from the same CrossRef response
                     let retraction = extract_retraction_from_item(&item);
+
+                    let journal = (!item_container.is_empty()).then(|| item_container.to_string());
+                    // CrossRef "issued" looks like {"date-parts":[[2024,9,13]]} — year is first.
+                    let year = item["issued"]["date-parts"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|a| a.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_u64())
+                        .and_then(|y| u16::try_from(y).ok());
+                    let volume = item["volume"].as_str().map(String::from);
+                    let issue = item["issue"].as_str().map(String::from);
+                    let pages = item["page"].as_str().map(String::from);
 
                     return Ok(DbQueryResult {
                         found_title: Some(found_title.to_string()),
                         authors,
                         paper_url,
                         retraction: Some(retraction),
-                        source_label: None,
+                        journal,
+                        year,
+                        volume,
+                        issue,
+                        pages,
+                        doi: doi_str,
+                        ..DbQueryResult::default()
                     });
                 }
             }

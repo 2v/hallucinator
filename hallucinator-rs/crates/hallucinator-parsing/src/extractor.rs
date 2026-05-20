@@ -145,6 +145,7 @@ impl ReferenceExtractor {
                         skip_reason: Some(match reason {
                             SkipReason::ShortTitle => "short_title".to_string(),
                         }),
+                        ..Reference::default()
                     });
                 }
                 ParsedRef::Ref(mut r) => {
@@ -298,6 +299,7 @@ fn parse_single_reference(
         urls,
         original_number: 0, // placeholder; overwritten by caller
         skip_reason: None,
+            ..Reference::default()
     })
 }
 

@@ -212,17 +212,30 @@ struct AggState {
     retraction: Option<crate::retraction::RetractionResult>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct VerifiedInfo {
     source: String,
     found_authors: Vec<String>,
     paper_url: Option<String>,
+    journal: Option<String>,
+    year: Option<u16>,
+    volume: Option<String>,
+    issue: Option<String>,
+    pages: Option<String>,
+    doi: Option<String>,
 }
 
+#[derive(Clone, Default)]
 struct MismatchInfo {
     source: String,
     found_authors: Vec<String>,
     paper_url: Option<String>,
+    journal: Option<String>,
+    year: Option<u16>,
+    volume: Option<String>,
+    issue: Option<String>,
+    pages: Option<String>,
+    doi: Option<String>,
 }
 
 /// A job submitted to a drainer's queue.
@@ -394,6 +407,12 @@ async fn report_result(
                             .unwrap_or_else(|| db_name.to_string()),
                         found_authors: found_authors.clone(),
                         paper_url: paper_url.clone(),
+                        journal: qr.journal.clone(),
+                        year: qr.year,
+                        volume: qr.volume.clone(),
+                        issue: qr.issue.clone(),
+                        pages: qr.pages.clone(),
+                        doi: qr.doi.clone(),
                     });
                 }
                 // Capture inline retraction info (populated by CrossRef)
@@ -464,6 +483,12 @@ async fn report_result(
                             .unwrap_or_else(|| db_name.to_string()),
                         found_authors: found_authors.clone(),
                         paper_url: paper_url.clone(),
+                        journal: qr.journal.clone(),
+                        year: qr.year,
+                        volume: qr.volume.clone(),
+                        issue: qr.issue.clone(),
+                        pages: qr.pages.clone(),
+                        doi: qr.doi.clone(),
                     });
                 }
             }
@@ -778,6 +803,8 @@ async fn apply_fallbacks(
 ///
 /// Called exactly once, by whichever drainer decrements `remaining` to 0.
 async fn finalize_collector(collector: &RefCollector) {
+    // `matched_db` carries the biblio fields from the winning DB record
+    // so the per-field ValidationReport can compare them.
     let (
         status,
         source,
@@ -786,11 +813,38 @@ async fn finalize_collector(collector: &RefCollector) {
         remote_failed_dbs,
         remote_db_results,
         inline_retraction,
+        matched_db,
     ) = {
         let state = collector.state.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Precedence: rich-DB verified > mismatch (caught by a rich DB
-        // that could disambiguate look-alikes) > any verified > NotFound.
+        fn db_from_verified(v: &VerifiedInfo) -> crate::db::DbQueryResult {
+            crate::db::DbQueryResult {
+                authors: v.found_authors.clone(),
+                paper_url: v.paper_url.clone(),
+                journal: v.journal.clone(),
+                year: v.year,
+                volume: v.volume.clone(),
+                issue: v.issue.clone(),
+                pages: v.pages.clone(),
+                doi: v.doi.clone(),
+                ..crate::db::DbQueryResult::default()
+            }
+        }
+        fn db_from_mismatch(m: &MismatchInfo) -> crate::db::DbQueryResult {
+            crate::db::DbQueryResult {
+                authors: m.found_authors.clone(),
+                paper_url: m.paper_url.clone(),
+                journal: m.journal.clone(),
+                year: m.year,
+                volume: m.volume.clone(),
+                issue: m.issue.clone(),
+                pages: m.pages.clone(),
+                doi: m.doi.clone(),
+                ..crate::db::DbQueryResult::default()
+            }
+        }
+
+        // Precedence: rich-DB verified > mismatch > any verified > NotFound.
         let rich_verified = state
             .verified_info
             .as_ref()
@@ -806,6 +860,7 @@ async fn finalize_collector(collector: &RefCollector) {
                 state.failed_dbs.clone(),
                 state.db_results.clone(),
                 state.retraction.clone(),
+                Some(db_from_verified(v)),
             )
         } else if let Some(ref m) = state.first_mismatch {
             (
@@ -816,6 +871,7 @@ async fn finalize_collector(collector: &RefCollector) {
                 state.failed_dbs.clone(),
                 state.db_results.clone(),
                 None,
+                Some(db_from_mismatch(m)),
             )
         } else if let Some(ref v) = state.verified_info {
             (
@@ -826,6 +882,7 @@ async fn finalize_collector(collector: &RefCollector) {
                 state.failed_dbs.clone(),
                 state.db_results.clone(),
                 state.retraction.clone(),
+                Some(db_from_verified(v)),
             )
         } else {
             (
@@ -835,6 +892,7 @@ async fn finalize_collector(collector: &RefCollector) {
                 None,
                 state.failed_dbs.clone(),
                 state.db_results.clone(),
+                None,
                 None,
             )
         }
@@ -933,6 +991,18 @@ async fn finalize_collector(collector: &RefCollector) {
         None
     };
 
+    let report = match (&status, &matched_db, source.as_deref()) {
+        (Status::NotFound, _, _) => Some(crate::report::build_validation_report(
+            &collector.reference,
+            None,
+        )),
+        (_, Some(db), Some(src)) => Some(crate::report::build_validation_report(
+            &collector.reference,
+            Some((src, db)),
+        )),
+        _ => None,
+    };
+
     let result = ValidationResult {
         title: collector.title.clone(),
         raw_citation: collector.reference.raw_citation.clone(),
@@ -947,6 +1017,7 @@ async fn finalize_collector(collector: &RefCollector) {
         arxiv_info,
         retraction_info,
         url_check_skipped,
+        report,
     };
 
     emit_final_events(
@@ -1055,6 +1126,12 @@ fn pre_check_remote_cache(
                             source: qr.source_label.clone().unwrap_or_else(|| db_name.clone()),
                             found_authors: qr.authors,
                             paper_url: qr.paper_url,
+                            journal: qr.journal,
+                            year: qr.year,
+                            volume: qr.volume,
+                            issue: qr.issue,
+                            pages: qr.pages,
+                            doi: qr.doi,
                         });
                     }
                 } else {
@@ -1103,6 +1180,12 @@ fn pre_check_remote_cache(
                             source: qr.source_label.clone().unwrap_or_else(|| db_name.clone()),
                             found_authors: qr.authors,
                             paper_url: qr.paper_url,
+                            journal: qr.journal,
+                            year: qr.year,
+                            volume: qr.volume,
+                            issue: qr.issue,
+                            pages: qr.pages,
+                            doi: qr.doi,
                         });
                     }
                 }
@@ -1226,6 +1309,7 @@ async fn coordinator_loop(
                 arxiv_info: None,
                 retraction_info: None,
                 url_check_skipped,
+        report: None,
             };
             emit_final_events(progress.as_ref(), &result, ref_index, total, &title);
             let _ = result_tx.send(result);
@@ -1321,6 +1405,20 @@ async fn coordinator_loop(
                 }
             });
 
+            let matched_db = crate::db::DbQueryResult {
+                authors: verified.found_authors.clone(),
+                paper_url: verified.paper_url.clone(),
+                journal: verified.journal.clone(),
+                year: verified.year,
+                volume: verified.volume.clone(),
+                issue: verified.issue.clone(),
+                pages: verified.pages.clone(),
+                doi: verified.doi.clone(),
+                ..crate::db::DbQueryResult::default()
+            };
+            let report =
+                Some(crate::report::build_validation_report(&reference, Some((&verified.source, &matched_db))));
+
             let result = ValidationResult {
                 title: title.clone(),
                 raw_citation: reference.raw_citation.clone(),
@@ -1337,6 +1435,7 @@ async fn coordinator_loop(
                 // Verified from cache → never reaches apply_fallbacks,
                 // so the URL-check-skipped marker is vacuously false.
                 url_check_skipped: false,
+                report,
             };
 
             emit_final_events(progress.as_ref(), &result, ref_index, total, &title);
@@ -1355,6 +1454,7 @@ async fn coordinator_loop(
                         source: local_result.source.clone().unwrap_or_default(),
                         found_authors: local_result.found_authors.clone(),
                         paper_url: local_result.paper_url.clone(),
+                        ..MismatchInfo::default()
                     })
                 } else {
                     None
@@ -1363,22 +1463,48 @@ async fn coordinator_loop(
 
             // Rich-DB verified short-circuited above; remaining order
             // is mismatch > any cached verified > NotFound.
-            let (status, source, found_authors, paper_url) = if let Some(m) = first_mismatch {
+            let (status, source, found_authors, paper_url, matched_db) = if let Some(m) =
+                first_mismatch
+            {
+                let db = crate::db::DbQueryResult {
+                    authors: m.found_authors.clone(),
+                    paper_url: m.paper_url.clone(),
+                    journal: m.journal.clone(),
+                    year: m.year,
+                    volume: m.volume.clone(),
+                    issue: m.issue.clone(),
+                    pages: m.pages.clone(),
+                    doi: m.doi.clone(),
+                    ..crate::db::DbQueryResult::default()
+                };
                 (
                     Status::Mismatch(MismatchKind::AUTHOR),
-                    Some(m.source),
+                    Some(m.source.clone()),
                     m.found_authors,
                     m.paper_url,
+                    Some((m.source, db)),
                 )
             } else if let Some(v) = pre.verified_info {
+                let db = crate::db::DbQueryResult {
+                    authors: v.found_authors.clone(),
+                    paper_url: v.paper_url.clone(),
+                    journal: v.journal.clone(),
+                    year: v.year,
+                    volume: v.volume.clone(),
+                    issue: v.issue.clone(),
+                    pages: v.pages.clone(),
+                    doi: v.doi.clone(),
+                    ..crate::db::DbQueryResult::default()
+                };
                 (
                     Status::Verified,
-                    Some(v.source),
+                    Some(v.source.clone()),
                     v.found_authors,
                     v.paper_url,
+                    Some((v.source, db)),
                 )
             } else {
-                (Status::NotFound, None, vec![], None)
+                (Status::NotFound, None, vec![], None, None)
             };
 
             // Run URL Check + SearxNG fallbacks on NotFound even though
@@ -1401,6 +1527,12 @@ async fn coordinator_loop(
                 )
                 .await;
 
+            let report = match (&status, &matched_db) {
+                (Status::NotFound, _) => Some(crate::report::build_validation_report(&reference, None)),
+                (_, Some((name, db))) => Some(crate::report::build_validation_report(&reference, Some((name, db)))),
+                _ => None,
+            };
+
             let result = ValidationResult {
                 title: title.clone(),
                 raw_citation: reference.raw_citation.clone(),
@@ -1419,6 +1551,7 @@ async fn coordinator_loop(
                 arxiv_info: None, // TODO(#124): implement arXiv ID validation
                 retraction_info: None,
                 url_check_skipped,
+                report,
             };
 
             emit_final_events(progress.as_ref(), &result, ref_index, total, &title);
@@ -1433,6 +1566,7 @@ async fn coordinator_loop(
                     source: local_result.source.clone().unwrap_or_default(),
                     found_authors: local_result.found_authors.clone(),
                     paper_url: local_result.paper_url.clone(),
+                    ..MismatchInfo::default()
                 })
             } else {
                 None
@@ -1563,5 +1697,6 @@ fn build_validation_result(
         // Callers that reach this helper feed pre-fallback status,
         // so they haven't made a URL-check decision yet.
         url_check_skipped: false,
+            report: None,
     }
 }

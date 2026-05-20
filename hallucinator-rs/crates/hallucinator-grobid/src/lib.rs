@@ -56,6 +56,7 @@ pub fn extract_references_from_grobid_str(content: &str) -> Result<ExtractionRes
                     urls: vec![],
                     original_number: idx + 1,
                     skip_reason: Some("no_title".to_string()),
+                    ..Reference::default()
                 });
                 continue;
             }
@@ -71,6 +72,7 @@ pub fn extract_references_from_grobid_str(content: &str) -> Result<ExtractionRes
                     urls: vec![],
                     original_number: idx + 1,
                     skip_reason: Some("short_title".to_string()),
+                    ..Reference::default()
                 });
                 continue;
             }
@@ -85,6 +87,7 @@ pub fn extract_references_from_grobid_str(content: &str) -> Result<ExtractionRes
                     urls: vec![],
                     original_number: idx + 1,
                     skip_reason: Some("no_title".to_string()),
+                    ..Reference::default()
                 });
                 continue;
             }
@@ -115,6 +118,11 @@ pub fn extract_references_from_grobid_str(content: &str) -> Result<ExtractionRes
             urls: entry.urls.clone(),
             original_number: idx + 1,
             skip_reason: None,
+            journal: entry.venue.clone(),
+            year: entry.year,
+            volume: entry.volume.clone(),
+            issue: entry.issue.clone(),
+            pages: entry.pages.clone(),
         });
     }
 
@@ -133,6 +141,10 @@ struct BiblEntry {
     arxiv_id: Option<String>,
     urls: Vec<String>,
     venue: Option<String>,
+    year: Option<u16>,
+    volume: Option<String>,
+    issue: Option<String>,
+    pages: Option<String>,
 }
 
 fn build_raw_citation(entry: &BiblEntry) -> String {
@@ -180,6 +192,11 @@ fn parse_bibl_structs(xml: &str) -> Result<Vec<BiblEntry>, GrobidError> {
     // idno capture
     let mut in_idno_doi = false;
     let mut in_idno_arxiv = false;
+
+    // biblScope text capture (used when from/to attrs are absent)
+    let mut in_biblscope_page = false;
+    let mut in_biblscope_volume = false;
+    let mut in_biblscope_issue = false;
 
     // ref type="url" capture
     let mut in_ref_url = false;
@@ -257,6 +274,49 @@ fn parse_bibl_structs(xml: &str) -> Result<Vec<BiblEntry>, GrobidError> {
                             }
                         }
                     }
+                    b"date" if current.is_some() => {
+                        // <date when="2024-09-13" .../> — pull year from `when`.
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"when"
+                                && let Some(ref mut entry) = current
+                            {
+                                let val = String::from_utf8_lossy(&attr.value);
+                                let yr: String = val.chars().take(4).collect();
+                                if let Ok(y) = yr.parse::<u16>() {
+                                    entry.year = Some(y);
+                                }
+                            }
+                        }
+                    }
+                    b"biblScope" if current.is_some() => {
+                        let mut unit: Option<String> = None;
+                        let mut from_attr: Option<String> = None;
+                        let mut to_attr: Option<String> = None;
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"unit" => unit = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                                b"from" => from_attr = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                                b"to" => to_attr = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                                _ => {}
+                            }
+                        }
+                        if let (Some(u), Some(entry)) = (&unit, current.as_mut()) {
+                            match u.as_str() {
+                                "page" => {
+                                    if let (Some(f), Some(t)) = (&from_attr, &to_attr) {
+                                        entry.pages = Some(format!("{}-{}", f, t));
+                                    } else if let Some(f) = &from_attr {
+                                        entry.pages = Some(f.clone());
+                                    } else {
+                                        in_biblscope_page = true;
+                                    }
+                                }
+                                "volume" => in_biblscope_volume = true,
+                                "issue" | "number" => in_biblscope_issue = true,
+                                _ => {}
+                            }
+                        }
+                    }
                     b"ptr" if current.is_some() => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"target" {
@@ -284,17 +344,55 @@ fn parse_bibl_structs(xml: &str) -> Result<Vec<BiblEntry>, GrobidError> {
             }
             Ok(Event::Empty(ref e)) => {
                 let local = e.local_name();
-                if local.as_ref() == b"ptr" && current.is_some() {
-                    for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"target" {
-                            let url = String::from_utf8_lossy(&attr.value).trim().to_string();
-                            if !url.is_empty()
-                                && let Some(ref mut entry) = current
-                            {
-                                entry.urls.push(url);
+                match local.as_ref() {
+                    b"ptr" if current.is_some() => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"target" {
+                                let url = String::from_utf8_lossy(&attr.value).trim().to_string();
+                                if !url.is_empty()
+                                    && let Some(ref mut entry) = current
+                                {
+                                    entry.urls.push(url);
+                                }
                             }
                         }
                     }
+                    b"date" if current.is_some() => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"when"
+                                && let Some(ref mut entry) = current
+                            {
+                                let val = String::from_utf8_lossy(&attr.value);
+                                let yr: String = val.chars().take(4).collect();
+                                if let Ok(y) = yr.parse::<u16>() {
+                                    entry.year = Some(y);
+                                }
+                            }
+                        }
+                    }
+                    b"biblScope" if current.is_some() => {
+                        let mut unit: Option<String> = None;
+                        let mut from_attr: Option<String> = None;
+                        let mut to_attr: Option<String> = None;
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"unit" => unit = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                                b"from" => from_attr = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                                b"to" => to_attr = Some(String::from_utf8_lossy(&attr.value).to_string()),
+                                _ => {}
+                            }
+                        }
+                        if let (Some(u), Some(entry)) = (unit, current.as_mut())
+                            && u == "page"
+                        {
+                            if let (Some(f), Some(t)) = (&from_attr, &to_attr) {
+                                entry.pages = Some(format!("{}-{}", f, t));
+                            } else if let Some(f) = &from_attr {
+                                entry.pages = Some(f.clone());
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             Ok(Event::Text(ref e)) => {
@@ -325,6 +423,24 @@ fn parse_bibl_structs(xml: &str) -> Result<Vec<BiblEntry>, GrobidError> {
                     }
                     if in_idno_arxiv {
                         entry.arxiv_id = Some(text.trim().to_string());
+                    }
+                    if in_biblscope_page {
+                        let t = text.trim().to_string();
+                        if !t.is_empty() {
+                            entry.pages = Some(t);
+                        }
+                    }
+                    if in_biblscope_volume {
+                        let t = text.trim().to_string();
+                        if !t.is_empty() {
+                            entry.volume = Some(t);
+                        }
+                    }
+                    if in_biblscope_issue {
+                        let t = text.trim().to_string();
+                        if !t.is_empty() {
+                            entry.issue = Some(t);
+                        }
                     }
                     if in_ref_url {
                         let url = text.trim().to_string();
@@ -369,6 +485,11 @@ fn parse_bibl_structs(xml: &str) -> Result<Vec<BiblEntry>, GrobidError> {
                     b"idno" => {
                         in_idno_doi = false;
                         in_idno_arxiv = false;
+                    }
+                    b"biblScope" => {
+                        in_biblscope_page = false;
+                        in_biblscope_volume = false;
+                        in_biblscope_issue = false;
                     }
                     b"ref" => in_ref_url = false,
                     _ => {}

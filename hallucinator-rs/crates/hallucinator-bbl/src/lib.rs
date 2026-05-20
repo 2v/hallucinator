@@ -62,6 +62,7 @@ pub fn extract_references_from_bbl_str(content: &str) -> Result<ExtractionResult
                     urls: vec![],
                     original_number: raw_idx + 1,
                     skip_reason: Some("no_title".to_string()),
+            ..Reference::default()
                 });
                 continue;
             }
@@ -76,6 +77,7 @@ pub fn extract_references_from_bbl_str(content: &str) -> Result<ExtractionResult
                     urls: vec![],
                     original_number: raw_idx + 1,
                     skip_reason: Some("short_title".to_string()),
+            ..Reference::default()
                 });
                 continue;
             }
@@ -90,6 +92,7 @@ pub fn extract_references_from_bbl_str(content: &str) -> Result<ExtractionResult
                     urls: vec![],
                     original_number: raw_idx + 1,
                     skip_reason: Some("no_title".to_string()),
+            ..Reference::default()
                 });
                 continue;
             }
@@ -118,6 +121,7 @@ pub fn extract_references_from_bbl_str(content: &str) -> Result<ExtractionResult
                 urls: vec![],
                 original_number: raw_idx + 1,
                 skip_reason: Some("url_only".to_string()),
+            ..Reference::default()
             });
             continue;
         }
@@ -135,6 +139,7 @@ pub fn extract_references_from_bbl_str(content: &str) -> Result<ExtractionResult
             urls: vec![],
             original_number: raw_idx + 1,
             skip_reason: None,
+            ..Reference::default()
         });
     }
 
@@ -246,6 +251,7 @@ fn process_bib_entries(entries: &[&biblatex::Entry]) -> ExtractionResult {
                     urls: vec![],
                     original_number: raw_idx + 1,
                     skip_reason: Some("no_title".to_string()),
+            ..Reference::default()
                 });
                 continue;
             }
@@ -260,6 +266,7 @@ fn process_bib_entries(entries: &[&biblatex::Entry]) -> ExtractionResult {
                     urls: vec![],
                     original_number: raw_idx + 1,
                     skip_reason: Some("short_title".to_string()),
+            ..Reference::default()
                 });
                 continue;
             }
@@ -274,6 +281,7 @@ fn process_bib_entries(entries: &[&biblatex::Entry]) -> ExtractionResult {
                     urls: vec![],
                     original_number: raw_idx + 1,
                     skip_reason: Some("no_title".to_string()),
+            ..Reference::default()
                 });
                 continue;
             }
@@ -304,26 +312,30 @@ fn process_bib_entries(entries: &[&biblatex::Entry]) -> ExtractionResult {
         // Extract arXiv ID from eprint field or journal field
         let arxiv_id = extract_arxiv_from_bib_entry(entry);
 
+        let journal_field = entry
+            .get("journal")
+            .map(chunks_to_string)
+            .or_else(|| entry.get("booktitle").map(chunks_to_string))
+            .filter(|s| !s.is_empty());
+        let year_str = entry.get("year").map(chunks_to_string);
+        let year_num = year_str
+            .as_deref()
+            .and_then(|s| s.chars().filter(|c| c.is_ascii_digit()).take(4).collect::<String>().parse::<u16>().ok());
+        let volume = entry.get("volume").map(chunks_to_string).filter(|s| !s.is_empty());
+        let issue = entry.get("number").map(chunks_to_string).filter(|s| !s.is_empty());
+        let pages = entry.get("pages").map(chunks_to_string).filter(|s| !s.is_empty());
+
         // Build raw citation for display
         let mut raw_parts = Vec::new();
         if !authors.is_empty() {
             raw_parts.push(authors.join(", "));
         }
         raw_parts.push(title.clone());
-        if let Some(journal) = entry.get("journal").map(chunks_to_string)
-            && !journal.is_empty()
-        {
-            raw_parts.push(journal);
+        if let Some(j) = &journal_field {
+            raw_parts.push(j.clone());
         }
-        if let Some(booktitle) = entry.get("booktitle").map(chunks_to_string)
-            && !booktitle.is_empty()
-        {
-            raw_parts.push(booktitle);
-        }
-        if let Some(year) = entry.get("year").map(chunks_to_string)
-            && !year.is_empty()
-        {
-            raw_parts.push(year);
+        if let Some(y) = &year_str {
+            raw_parts.push(y.clone());
         }
         let raw_citation = raw_parts.join(". ");
 
@@ -336,6 +348,11 @@ fn process_bib_entries(entries: &[&biblatex::Entry]) -> ExtractionResult {
             urls: vec![],
             original_number: raw_idx + 1,
             skip_reason: None,
+            journal: journal_field,
+            year: year_num,
+            volume,
+            issue,
+            pages,
         });
     }
 

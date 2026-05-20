@@ -189,6 +189,7 @@ pub async fn check_single_reference(
                     arxiv_info: None,
                     retraction_info,
                     url_check_skipped: false,
+            report: None,
                 };
             }
             DoiMatchResult::AuthorMismatch {
@@ -216,6 +217,7 @@ pub async fn check_single_reference(
                     arxiv_info: None,
                     retraction_info: None,
                     url_check_skipped: false,
+            report: None,
                 };
             }
             _ => {
@@ -457,6 +459,7 @@ pub async fn check_single_reference(
         // non-pool call sites that don't run the URL/Wayback fallbacks,
         // so there's nothing for the reporting layer to reclassify.
         url_check_skipped: false,
+            report: None,
     }
 }
 
@@ -496,5 +499,6 @@ pub async fn check_single_reference_retry(
         retraction_info: None,
         // Retry path also doesn't exercise the URL/Wayback fallbacks.
         url_check_skipped: false,
+            report: None,
     }
 }

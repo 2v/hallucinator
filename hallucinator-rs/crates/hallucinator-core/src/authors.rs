@@ -242,6 +242,65 @@ pub fn validate_authors(ref_authors: &[String], found_authors: &[String]) -> boo
     }
 }
 
+/// Per-author breakdown of how cited authors compare to a DB record's
+/// author list. Same matching machinery as [`validate_authors`] but
+/// returns one [`crate::report::AuthorFieldStatus`] per cited author
+/// instead of collapsing to a single bool.
+pub fn classify_authors(
+    ref_authors: &[String],
+    found_authors: &[String],
+) -> Vec<crate::report::AuthorFieldStatus> {
+    use crate::report::{AuthorFieldStatus, AuthorStatus};
+
+    let found_keys: Vec<(usize, AuthorKey)> = found_authors
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| make_author_key(a).map(|k| (i, k)))
+        .collect();
+
+    ref_authors
+        .iter()
+        .map(|cited| {
+            let cited_str = cited.clone();
+            let key = match make_author_key(cited) {
+                Some(k) => k,
+                None => {
+                    return AuthorFieldStatus {
+                        cited: cited_str,
+                        status: AuthorStatus::NotInDb,
+                    };
+                }
+            };
+
+            let mut surname_collision: Option<String> = None;
+            for (i, f) in &found_keys {
+                if f.surname == key.surname {
+                    if keys_compat(&key, f) {
+                        return AuthorFieldStatus {
+                            cited: cited_str,
+                            status: AuthorStatus::Matched {
+                                db_match: found_authors[*i].clone(),
+                            },
+                        };
+                    }
+                    if surname_collision.is_none() {
+                        surname_collision = Some(found_authors[*i].clone());
+                    }
+                }
+            }
+
+            let status = match surname_collision {
+                Some(db_candidate) => AuthorStatus::PotentialLookalike { db_candidate },
+                None => AuthorStatus::NotInDb,
+            };
+            AuthorFieldStatus {
+                cited: cited_str,
+                status,
+            }
+        })
+        .collect()
+}
+
 /// A name is "ambiguous two-token" if it's exactly two whitespace-separated
 /// tokens, both begin with an uppercase letter, and neither is an initial or
 /// carries a period (i.e. we cannot tell Given-Family from Family-Given).

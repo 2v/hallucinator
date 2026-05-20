@@ -1442,6 +1442,7 @@ name = "hallucinator-reporting"
 version = "0.2.0"
 dependencies = [
  "hallucinator-core",
+ "serde_json",
 ]
 
 [[package]]

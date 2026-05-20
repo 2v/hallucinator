@@ -55,6 +55,7 @@ pub mod matching;
 pub mod orchestrator;
 pub mod pool;
 pub mod rate_limit;
+pub mod report;
 pub mod retraction;
 pub mod text_utils;
 
@@ -66,7 +67,7 @@ pub use rate_limit::{DbQueryError, RateLimitedResult, RateLimiters};
 pub use text_utils::{extract_arxiv_id, extract_doi, extract_urls, get_query_words};
 
 /// A parsed reference extracted from a document.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Reference {
     pub raw_citation: String,
     pub title: Option<String>,
@@ -80,6 +81,11 @@ pub struct Reference {
     pub original_number: usize,
     /// If set, this reference was skipped during extraction (e.g. "url_only", "short_title").
     pub skip_reason: Option<String>,
+    pub journal: Option<String>,
+    pub year: Option<u16>,
+    pub volume: Option<String>,
+    pub issue: Option<String>,
+    pub pages: Option<String>,
 }
 
 /// Statistics about references that were skipped during extraction.
@@ -208,6 +214,10 @@ pub struct ValidationResult {
     /// banner) so the absence of URL matching doesn't inflate the
     /// not-found / potential-hallucination count.
     pub url_check_skipped: bool,
+    /// Per-field structured signal so a UI can highlight potential
+    /// hallucinations (e.g. wrong year, swapped co-author) and let the
+    /// user veto false positives. None when not populated yet.
+    pub report: Option<report::ValidationReport>,
 }
 
 /// Progress events emitted during validation.
